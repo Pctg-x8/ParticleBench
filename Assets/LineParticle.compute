@@ -1,0 +1,81 @@
+// Compute Shader: GPU Controlled Line Particle
+
+// External Variables
+float gametime, deltaTime;
+
+struct SpawnData
+{
+    float3 forward; float colorSamplingV; float4 position;
+    float initialSpeedFactor, reductionRate, speedMag, lengthMag;
+};
+struct InstanceData
+{
+    float4 position;
+    float3 forward; float initialSpeedFactor;
+    float reductionRate, speedMag, lengthMag, spawnTime;
+    float3 reserved; float colorSamplingV;
+};
+struct InstanceDrawData
+{
+    float4 position[2];
+    float2 colorSampleCoord; float2 pad;
+};
+
+#pragma kernel InitReservedSlots
+#pragma kernel SpawnParticles
+#pragma kernel UpdateParticles
+
+RWStructuredBuffer<InstanceData> instanceProperties;
+
+uint spawnerCount;
+StructuredBuffer<SpawnData> spawnArgs;
+ConsumeStructuredBuffer<uint> reservedSlots;
+AppendStructuredBuffer<uint> reservedSlotsApp;
+[numthreads(1024, 1, 1)]
+void InitReservedSlots(uint index : SV_DispatchThreadID)
+{
+    reservedSlotsApp.Append(index);
+}
+[numthreads(256, 1, 1)]
+void SpawnParticles(uint index : SV_DispatchThreadID)
+{
+    [branch] if(index < spawnerCount)
+    {
+        uint newIndex = reservedSlots.Consume();
+        instanceProperties[newIndex].position = spawnArgs[index].position;
+        instanceProperties[newIndex].forward = spawnArgs[index].forward;
+        instanceProperties[newIndex].initialSpeedFactor = spawnArgs[index].initialSpeedFactor;
+        instanceProperties[newIndex].reductionRate = spawnArgs[index].reductionRate;
+        instanceProperties[newIndex].speedMag = spawnArgs[index].speedMag;
+        instanceProperties[newIndex].lengthMag = spawnArgs[index].lengthMag;
+        instanceProperties[newIndex].colorSamplingV = spawnArgs[index].colorSamplingV;
+        instanceProperties[newIndex].spawnTime = gametime;
+    }
+}
+
+AppendStructuredBuffer<InstanceDrawData> instanceDrawingData;
+
+void UpdateParticle(inout InstanceData instanceRef, float lifetime)
+{
+    const float currentSpeed = instanceRef.initialSpeedFactor * pow(abs(instanceRef.reductionRate), lifetime * 60.0f);
+    instanceRef.position = mad(float4(instanceRef.forward, 0.0f), currentSpeed * instanceRef.speedMag * 3 * deltaTime, instanceRef.position);
+    const float4 pos2 = mad(float4(instanceRef.forward, 0.0f), (currentSpeed + 0.0625f) * instanceRef.lengthMag / 10.0f, instanceRef.position);
+    InstanceDrawData draw; draw.pad = float2(0.0f, 0.0f);
+    draw.position[0] = instanceRef.position; draw.position[1] = pos2; draw.colorSampleCoord = float2(lifetime, instanceRef.colorSamplingV);
+    instanceDrawingData.Append(draw);
+}
+[numthreads(1024, 1, 1)]
+void UpdateParticles(uint index : SV_DispatchThreadID)
+{
+    [branch] if(instanceProperties[index].position.w > 0.0f)
+    {
+        const float lifetime = gametime - instanceProperties[index].spawnTime;
+        [branch]
+        if(lifetime < 1.0) UpdateParticle(instanceProperties[index], lifetime);
+        else
+        {
+            instanceProperties[index].position.w = 0.0f;
+            reservedSlotsApp.Append(index);
+        }
+    }
+}
